@@ -1,0 +1,157 @@
+substitutions:
+  red_led_pin: GPIO4
+  green_led_pin: GPIO5
+
+esphome:
+  name: ldl508pro-radar
+  friendly_name: LDL508PRO Radar
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: local
+      path: components
+
+logger:
+  level: DEBUG
+  baud_rate: 0
+
+api:
+
+# MQTT parallel zur nativen Home-Assistant-API.
+# Die Komponente publiziert jedes abgeschlossene Fahrzeug zusätzlich genau einmal
+# nach <topic_prefix>/vehicle/event.
+mqtt:
+  broker: !secret mqtt_broker
+  username: !secret mqtt_user
+  password: !secret mqtt_password
+  topic_prefix: ldl508pro/radar
+  discovery: false
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  manual_ip:
+    static_ip: 192.168.178.220
+    gateway: 192.168.178.1
+    subnet: 255.255.255.0
+
+uart:
+  id: radar_uart
+  tx_pin: GPIO18
+  rx_pin: GPIO17
+  baud_rate: 115200
+  data_bits: 8
+  parity: NONE
+  stop_bits: 1
+  rx_buffer_size: 2048
+
+ldl508pro:
+  id: radar
+  uart_id: radar_uart
+  debug_uart: false
+  target_timeout: 1500ms
+  boot_read_delay: 2s
+  command_gap: 200ms
+  command_timeout: 1200ms
+  command_retries: 1
+
+  auto_enable_multi_target_after_sync: false
+  multi_target_polling: false
+
+  red_output_pin:
+    number: ${red_led_pin}
+    inverted: false
+  green_output_pin:
+    number: ${green_led_pin}
+    inverted: false
+
+  led_red_afterglow:
+    name: Radar LED Rot Nachlaufzeit
+  led_standby_timeout:
+    name: Radar LED Standby-Zeit
+
+  # Früher Filter: greift vor Sensor-Publishing, LEDs und Fahrzeugtracker.
+  # Erfasst den bekannten Bereich ca. 33,3 m bei ca. 89–94 km/h.
+  artifact_filter: true
+  artifact_distance: 33.3
+  artifact_distance_tolerance: 0.6
+  artifact_speed: 89.0
+  artifact_speed_tolerance: 5.0
+
+  # Dediziertes, nicht-retained MQTT-Ereignis pro abgeschlossenem Fahrzeug.
+  # Ein leerer mqtt_event_topic verwendet automatisch:
+  # <mqtt.topic_prefix>/vehicle/event
+  mqtt_event_enabled: true
+  mqtt_event_topic: ""
+  mqtt_event_qos: 0
+  mqtt_event_retain: false
+
+  distance:
+    name: Radar Entfernung
+  speed:
+    name: Radar Geschwindigkeit
+  detected:
+    name: Radar Ziel erkannt
+
+  vehicle_tracking:
+    name: Radar Fahrzeug wird verfolgt
+  vehicle_direction:
+    name: Radar Fahrzeugrichtung
+  last_vehicle_event:
+    name: Radar letztes Fahrzeugereignis
+  vehicle_id:
+    name: Radar Fahrzeug-ID
+  vehicle_count:
+    name: Radar Fahrzeugzähler
+  vehicle_max_speed:
+    name: Radar maximale Geschwindigkeit
+  vehicle_average_speed:
+    name: Radar durchschnittliche Geschwindigkeit
+  vehicle_start_distance:
+    name: Radar Startentfernung
+  vehicle_end_distance:
+    name: Radar Endentfernung
+  vehicle_min_distance:
+    name: Radar minimale Entfernung
+  vehicle_duration:
+    name: Radar Ereignisdauer
+  vehicle_samples:
+    name: Radar Messwerte pro Fahrzeug
+
+  config_synchronized:
+    name: Radar Konfiguration synchronisiert
+  last_config_error:
+    name: Radar letzter Konfigurationsfehler
+  last_cli_command:
+    name: Radar letzter CLI-Befehl
+
+  static_detection:
+    name: Radar statische Erkennung
+  speed_limit_enabled:
+    name: Radar Geschwindigkeitsfilter aktiv
+  speed_limit_high:
+    name: Radar Geschwindigkeitsgrenze oben
+  speed_limit_low:
+    name: Radar Geschwindigkeitsgrenze unten
+  power_mode:
+    name: Radar Leistungsmodus
+  doppler_filter:
+    name: Radar Richtungsfilter
+  distance_limit_high:
+    name: Radar Entfernungsgrenze oben
+  distance_limit_low:
+    name: Radar Entfernungsgrenze unten
+  speed_threshold:
+    name: Radar Geschwindigkeitsschwelle
+  snr_filter:
+    name: Radar SNR-Filter
+  refresh_settings:
+    name: Radar Einstellungen neu laden
