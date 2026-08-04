@@ -1,5 +1,10 @@
 # LDL508PRO Radar for ESPHome
 
+![Stable](https://img.shields.io/badge/status-stable--1.1-brightgreen)
+![ESPHome](https://img.shields.io/badge/ESPHome-2026.7+-blue)
+![ESP32](https://img.shields.io/badge/ESP32-S3-orange)
+![License](https://img.shields.io/badge/license-MIT-green)
+
 An enhanced ESPHome component for the **LDL508PRO Doppler radar sensor** with support for both **Single Target** and **Multi Target** operation.
 
 Originally based on the standard LDL508PRO ESPHome component, this project has evolved into an advanced radar platform featuring improved tracking, vehicle statistics, MQTT integration and runtime configuration.
