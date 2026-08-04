@@ -62,6 +62,7 @@ ldl508pro:
   command_gap: 200ms
   command_timeout: 1200ms
   command_retries: 1
+  multitarget_debug_mode: hex
 
   auto_enable_multi_target_after_sync: false
   multi_target_polling: false
@@ -100,6 +101,15 @@ ldl508pro:
     name: Radar Geschwindigkeit
   detected:
     name: Radar Ziel erkannt
+    
+  target_count:
+    name: Radar Zielanzahl
+
+  multi_target_active:
+    name: Radar Mehrziel aktiv
+
+  max_simultaneous_targets:
+    name: Radar maximal gleichzeitige Ziele
 
   vehicle_tracking:
     name: Radar Fahrzeug wird verfolgt
@@ -125,6 +135,9 @@ ldl508pro:
     name: Radar Ereignisdauer
   vehicle_samples:
     name: Radar Messwerte pro Fahrzeug
+
+  operating_mode:
+    name: Radar Betriebsart
 
   config_synchronized:
     name: Radar Konfiguration synchronisiert
