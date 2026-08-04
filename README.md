@@ -1,128 +1,184 @@
-# ESPHome LDL508PRO – stabile Einzelzielversion mit Rot/Grün-Ausgängen
+# LDL508PRO Radar for ESPHome
 
-Diese Variante konzentriert sich auf den stabilen, dokumentierten Einzelzielmodus des LDL508PRO.
-Die experimentelle automatische Mehrzielumschaltung ist in der Beispielkonfiguration deaktiviert.
+An enhanced ESPHome component for the **LDL508PRO Doppler radar sensor** with support for both **Single Target** and **Multi Target** operation.
 
-## GPIO-Ausgänge
+Originally based on the standard LDL508PRO ESPHome component, this project has evolved into an advanced radar platform featuring improved tracking, vehicle statistics, MQTT integration and runtime configuration.
 
-Die Komponente besitzt zwei optionale GPIO-Ausgänge:
+---
 
-- `red_output_pin`
-- `green_output_pin`
+# Features
 
-Beide sind für einen **active-HIGH LED-Treiber** ausgelegt. Ein HIGH-Pegel am ESP32 lässt den externen Treiber den jeweiligen GND-Kanal durchschalten.
+## Dual Operating Modes
 
-| Radarzustand | Rot | Grün |
-|---|---:|---:|
-| Ziel erkannt | HIGH | LOW |
-| Kein Ziel | LOW | HIGH |
+### Multi Target (Recommended)
 
-Die Pins werden direkt durch die Komponente geschaltet und folgen damit demselben internen Erkennungszustand wie der Home-Assistant-Binärsensor `detected`.
+- Native Mode 2 (HEX protocol)
+- Simultaneous tracking of multiple targets
+- Stable Track IDs
+- Primary target selection
+- Automatic vehicle completion detection
+- Ghost/artifact filtering
+- Vehicle statistics
+- MQTT event publishing
+- Grafana / InfluxDB ready
 
-## Beispiel
+### Single Target (Compatibility)
 
-```yaml
-ldl508pro:
-  id: radar
-  uart_id: radar_uart
-  auto_enable_multi_target_after_sync: false
-  multi_target_polling: false
+- Native Mode 1 (ASCII protocol)
+- Compatible with the original radar firmware
+- Same Home Assistant entities
+- Same MQTT event format
+- Runtime configurable
+- Ideal for testing and comparison
 
-  red_output_pin:
-    number: GPIO4
-    inverted: false
-  green_output_pin:
-    number: GPIO5
-    inverted: false
+The operating mode can be changed directly from Home Assistant without rebooting.
+
+---
+
+# Home Assistant
+
+The component exposes:
+
+## Live Sensors
+
+- Detection
+- Distance
+- Speed
+- Direction
+- Vehicle Tracking
+- Vehicle ID
+- Target Count
+- Multi Target Active
+
+## Vehicle Statistics
+
+- Vehicle Counter
+- Maximum Speed
+- Average Speed
+- Start Distance
+- End Distance
+- Minimum Distance
+- Duration
+- Sample Count
+- Last Vehicle Event
+
+---
+
+# Runtime Configuration
+
+Most radar parameters can be changed while the radar is running.
+
+The component automatically
+
+```
+HEX
+    ↓
+ASCII
+    ↓
+write/read parameter
+    ↓
+HEX
 ```
 
-`GPIO4` und `GPIO5` sind nur Beispiele. Vor dem Flashen müssen sie an die tatsächlich freien Pins deines Boards angepasst werden.
+without requiring a reboot.
 
-Beide Ausgänge müssen gemeinsam konfiguriert werden. Wird nur einer angegeben, schlägt die YAML-Validierung absichtlich fehl.
+When operating permanently in Single Target mode no protocol switching is necessary.
 
-## Elektrischer Hinweis
+---
 
-Die ESP32-GPIOs dürfen nur die Logikeingänge des LED-Treibers ansteuern. LED-Strom oder Versorgungsspannungen dürfen nicht direkt über die GPIOs geführt werden. ESP32 und Treiber benötigen eine gemeinsame Masse auf der Logikseite.
+# MQTT
 
-## Stabiler Betrieb
+Every completed vehicle produces a JSON event.
 
-Empfohlene Einstellungen:
+Example:
 
-```yaml
-logger:
-  baud_rate: 0
-  level: INFO
-
-ldl508pro:
-  debug_uart: false
-  target_timeout: 1500ms
-  auto_enable_multi_target_after_sync: false
-  multi_target_polling: false
+```json
+{
+  "id": 42,
+  "mode": "multi-target",
+  "protocol": "hex",
+  "direction": "Approaching",
+  "start_distance_m": 72.3,
+  "end_distance_m": 7.8,
+  "minimum_distance_m": 7.8,
+  "max_speed_kmh": 41.6,
+  "average_speed_kmh": 37.4,
+  "duration_s": 5.9,
+  "samples": 22,
+  "ghosts_filtered": 3,
+  "firmware": "stable-1.1-dual-mode"
+}
 ```
 
-Der Radar wird beim Start zunächst in Zielmodus 1 normalisiert, danach wird seine Konfiguration eingelesen. Entfernung, Geschwindigkeit, Richtung und Fahrzeugereignisse stammen aus den normalen `R distance speed`-Frames.
+---
 
-## Inhalt
+# Ghost Filtering
 
-- `components/ldl508pro/` – External Component
-- `example.yaml` – vollständige Beispielkonfiguration
+Known radar artifacts can be filtered before they reach
 
+- Home Assistant
+- MQTT
+- Vehicle Tracker
+- LED Outputs
 
-## Geistermessungsfilter
-
-Das beobachtete Fehlermuster `R 033.x -089.x` wird standardmäßig verworfen, bevor es Entfernung, Geschwindigkeit, Zielstatus, LEDs oder Fahrzeugzähler beeinflusst. Der Filter greift nur, wenn **Entfernung und Betrag der Geschwindigkeit gleichzeitig** im konfigurierten Fenster liegen.
+Example:
 
 ```yaml
 artifact_filter: true
 artifact_distance: 33.3
 artifact_distance_tolerance: 0.6
 artifact_speed: 89.0
-artifact_speed_tolerance: 2.0
+artifact_speed_tolerance: 5.0
 ```
 
-Im Log erscheint höchstens alle fünf Sekunden eine zusammengefasste Warnung mit der Anzahl verworfener Messungen.
+---
 
+# Supported Hardware
 
-## LED-Zeitsteuerung und Störungsanzeige
+- ESP32-S3
+- LDL508PRO Radar Sensor
 
-Die Beispielkonfiguration erzeugt zwei in Home Assistant veränderbare Number-Entitäten:
+---
 
-- `Radar LED Rot Nachlaufzeit`: 0–60 Sekunden, Startwert nach Neustart 5 Sekunden.
-- `Radar LED Standby-Zeit`: 0–3600 Sekunden, Startwert nach Neustart 60 Sekunden. `0` hält Grün dauerhaft aktiv.
+# Planned Features
 
-Nach einer Erkennung bleibt Rot für die Nachlaufzeit aktiv. Anschließend leuchtet Grün, bis die Standby-Zeit ohne neue Erkennung abgelaufen ist; danach sind beide Ausgänge LOW. Bei einem Konfigurationsfehler blinkt Rot mit 1 Hz und Grün bleibt aus. Eine erfolgreiche Konfigurationssynchronisierung beendet die Störungsanzeige.
+- Smart car detection
+- Carport automation
+- Warning light control
+- Traffic statistics
+- Adaptive radar parameters
+- Multiple artifact signatures
+- Automatic ghost learning
 
+---
 
-## Direktes MQTT-Fahrzeugereignis
+# Version
 
-Bei jedem abgeschlossenen Fahrzeug publiziert die Komponente genau eine JSON-Nachricht.
-Standardtopic bei leerem `mqtt_event_topic`:
+Current stable release
 
-```text
-<mqtt.topic_prefix>/vehicle/event
-```
+**stable-1.1-dual-mode**
 
-Mit dem Beispiel ist das:
+Highlights
 
-```text
-ldl508pro/radar/vehicle/event
-```
+- Dual operating mode
+- Runtime parameter configuration
+- Unified vehicle publisher
+- Multi Target tracking
+- Home Assistant integration
+- MQTT event system
+- Grafana ready
 
-Konfiguration:
+---
 
-```yaml
-ldl508pro:
-  mqtt_event_enabled: true
-  mqtt_event_topic: ""
-  mqtt_event_qos: 0
-  mqtt_event_retain: false
-```
+# Credits
 
-Beispielpayload:
+Based on the original ESPHome LDL508PRO component.
 
-```json
-{"id":11,"direction":"Annähernd","start_distance_m":39.2,"end_distance_m":12.3,"minimum_distance_m":12.3,"max_speed_kmh":21.2,"average_speed_kmh":17.0,"duration_s":8.1,"samples":32,"ghosts_filtered":7,"firmware":"stable-1.0-mqtt"}
-```
+Extended and redesigned with
 
-`retain` ist standardmäßig aus, damit Node-RED nach einem Neustart kein altes Fahrzeug erneut in InfluxDB schreibt.
-Die vorhandene Home-Assistant-Textsensor-Nachricht bleibt parallel erhalten.
+- Dual-mode architecture
+- Multi Target tracking
+- Runtime protocol switching
+- Vehicle event system
+- MQTT event publishing
+- Advanced artifact filtering
