@@ -1,7 +1,9 @@
 substitutions:
   red_led_pin: GPIO4
   green_led_pin: GPIO5
-
+  warning_led_pin: GPIO6
+  barrier_pin: GPIO13
+  
 esphome:
   name: ldl508pro-radar
   friendly_name: LDL508PRO Radar
@@ -18,9 +20,18 @@ external_components:
 
 logger:
   level: DEBUG
+  # Bei Nutzung der Hardware-UART-Pins nicht dieselbe UART
+  # für den seriellen Logger verwenden.
   baud_rate: 0
 
 api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
 
 # MQTT parallel zur nativen Home-Assistant-API.
 # Die Komponente publiziert jedes abgeschlossene Fahrzeug zusätzlich genau einmal
@@ -78,6 +89,28 @@ ldl508pro:
     name: Radar LED Rot Nachlaufzeit
   led_standby_timeout:
     name: Radar LED Standby-Zeit
+
+  warning_output_pin:
+    number: $(warning_led_pin)
+    inverted: false
+
+  carport_barrier_pin:
+    number: $(barrier_pin)
+    mode:
+      input: true
+      pullup: true
+    inverted: false
+
+  carport_clear_confirm: 2s
+
+  carport_beam_clear:
+    name: "Carport Lichtschranke frei"
+  
+  carport_occupied:
+    name: "Carport belegt"
+  
+  carport_departure:
+    name: "Carport Ausfahrt erkannt"
 
   # Früher Filter: greift vor Sensor-Publishing, LEDs und Fahrzeugtracker.
   # Erfasst den bekannten Bereich ca. 33,3 m bei ca. 89–94 km/h.
