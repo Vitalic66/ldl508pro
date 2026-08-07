@@ -47,6 +47,9 @@ CONF_RAW_CAPTURE_DURATION = "raw_capture_duration"
 CONF_RAW_CAPTURE_MAX_BYTES = "raw_capture_max_bytes"
 CONF_RED_OUTPUT_PIN = "red_output_pin"
 CONF_GREEN_OUTPUT_PIN = "green_output_pin"
+CONF_CARPORT_BARRIER_PIN = "carport_barrier_pin"
+CONF_WARNING_OUTPUT_PIN = "warning_output_pin"
+CONF_CARPORT_CLEAR_CONFIRM = "carport_clear_confirm"
 CONF_ARTIFACT_FILTER = "artifact_filter"
 CONF_ARTIFACT_DISTANCE = "artifact_distance"
 CONF_ARTIFACT_DISTANCE_TOLERANCE = "artifact_distance_tolerance"
@@ -67,6 +70,9 @@ CONF_MULTITARGET_MQTT_QOS = "multitarget_mqtt_qos"
 CONF_DISTANCE = "distance"
 CONF_SPEED = "speed"
 CONF_DETECTED = "detected"
+CONF_CARPORT_BEAM_CLEAR = "carport_beam_clear"
+CONF_CARPORT_OCCUPIED = "carport_occupied"
+CONF_CARPORT_DEPARTURE = "carport_departure"
 CONF_CONFIG_SYNCHRONIZED = "config_synchronized"
 CONF_CONFIGURATION = "configuration"
 CONF_LAST_CONFIG_ERROR = "last_config_error"
@@ -169,6 +175,9 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_RAW_CAPTURE_MAX_BYTES, default=4096): cv.int_range(min=256, max=65536),
             cv.Optional(CONF_RED_OUTPUT_PIN): pins.gpio_output_pin_schema,
             cv.Optional(CONF_GREEN_OUTPUT_PIN): pins.gpio_output_pin_schema,
+            cv.Optional(CONF_CARPORT_BARRIER_PIN): pins.gpio_input_pin_schema,
+            cv.Optional(CONF_WARNING_OUTPUT_PIN): pins.gpio_output_pin_schema,
+            cv.Optional(CONF_CARPORT_CLEAR_CONFIRM, default="2s",): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_ARTIFACT_FILTER, default=True): cv.boolean,
             cv.Optional(CONF_ARTIFACT_DISTANCE, default=33.3): cv.float_range(min=0.0, max=140.0),
             cv.Optional(CONF_ARTIFACT_DISTANCE_TOLERANCE, default=0.6): cv.float_range(min=0.0, max=20.0),
@@ -203,6 +212,13 @@ CONFIG_SCHEMA = (
             ),
             cv.Optional(CONF_DETECTED): binary_sensor.binary_sensor_schema(
                 device_class=DEVICE_CLASS_OCCUPANCY,
+            ),
+            cv.Optional(CONF_CARPORT_BEAM_CLEAR): binary_sensor.binary_sensor_schema(
+            ),
+            cv.Optional(CONF_CARPORT_OCCUPIED): binary_sensor.binary_sensor_schema(
+                device_class=DEVICE_CLASS_OCCUPANCY,
+            ),
+            cv.Optional(CONF_CARPORT_DEPARTURE): binary_sensor.binary_sensor_schema(
             ),
             cv.Optional(CONF_CONFIG_SYNCHRONIZED): binary_sensor.binary_sensor_schema(
                 device_class=DEVICE_CLASS_CONNECTIVITY,
@@ -409,6 +425,16 @@ async def to_code(config):
         )
         cg.add(var.register_led_number(setting, entity))
 
+    if CONF_CARPORT_BARRIER_PIN in config:
+        pin = await cg.gpio_pin_expression(config[CONF_CARPORT_BARRIER_PIN])
+        cg.add(var.set_carport_barrier_pin(pin))
+
+    cg.add(var.set_carport_clear_confirm_ms(config[CONF_CARPORT_CLEAR_CONFIRM].total_milliseconds))
+
+    if CONF_WARNING_OUTPUT_PIN in config:
+        pin = await cg.gpio_pin_expression(config[CONF_WARNING_OUTPUT_PIN])
+        cg.add(var.set_warning_output_pin(pin))
+
     if distance_config := config.get(CONF_DISTANCE):
         entity = await sensor.new_sensor(distance_config)
         cg.add(var.set_distance_sensor(entity))
@@ -418,6 +444,15 @@ async def to_code(config):
     if detected_config := config.get(CONF_DETECTED):
         entity = await binary_sensor.new_binary_sensor(detected_config)
         cg.add(var.set_detected_sensor(entity))
+    if beam_config := config.get(CONF_CARPORT_BEAM_CLEAR):
+        entity = await binary_sensor.new_binary_sensor(beam_config)
+        cg.add(var.set_carport_beam_clear_sensor(entity))
+    if occupied_config := config.get(CONF_CARPORT_OCCUPIED):
+        entity = await binary_sensor.new_binary_sensor(occupied_config)
+        cg.add(var.set_carport_occupied_sensor(entity))
+    if departure_config := config.get(CONF_CARPORT_DEPARTURE):
+        entity = await binary_sensor.new_binary_sensor(departure_config)
+        cg.add(var.set_carport_departure_sensor(entity))
     if sync_config := config.get(CONF_CONFIG_SYNCHRONIZED):
         entity = await binary_sensor.new_binary_sensor(sync_config)
         cg.add(var.set_config_synchronized_sensor(entity))

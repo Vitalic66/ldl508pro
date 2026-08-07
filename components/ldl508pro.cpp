@@ -17,7 +17,7 @@ namespace ldl508pro {
 static const char *const TAG = "ldl508pro";
 
 static const char *const FIRMWARE_VERSION =
-    "stable-1.1-dual-mode";
+    "stable-1.1.1-dual-mode";
 
 std::string LDL508PROComponent::escape_raw_bytes_(const std::string &value) {
   std::string out;
@@ -68,15 +68,22 @@ void LDLButton::press_action() {
 void LDL508PROComponent::setup() {
   this->setup_ms_ = millis();
   this->rx_buffer_.reserve(96);
-  if (this->red_output_pin_ != nullptr) {
-    this->red_output_pin_->setup();
-    this->red_output_pin_->digital_write(false);
+
+  this->status_lights_.setup(this->setup_ms_);
+
+  this->carport_presence_.setup(this->setup_ms_);
+
+  this->driveway_controller_.setup(this->setup_ms_);
+
+  this->warning_light_.setup();
+
+  if (this->carport_departure_sensor_ != nullptr) {
+    this->carport_departure_sensor_->publish_state(false);
   }
-  if (this->green_output_pin_ != nullptr) {
-    this->green_output_pin_->setup();
-    this->green_output_pin_->digital_write(false);
-  }
-  this->led_idle_started_ms_ = this->setup_ms_;
+
+this->update_carport_sensors_(
+    this->setup_ms_);
+
   this->publish_detection_(false);
   if (this->config_synchronized_sensor_ != nullptr) {
     this->config_synchronized_sensor_->publish_state(false);
@@ -104,10 +111,21 @@ void LDL508PROComponent::setup() {
   }
   if (this->target_mode_status_sensor_ != nullptr) this->target_mode_status_sensor_->publish_state("Unverändert / unbekannt");
   if (this->raw_capture_status_sensor_ != nullptr) this->raw_capture_status_sensor_->publish_state("Bereit");
+
   auto red_hold = this->led_numbers_.find(LEDSetting::RED_AFTERGLOW);
-  if (red_hold != this->led_numbers_.end()) red_hold->second->publish_state(this->led_red_afterglow_ms_ / 1000.0f);
+  if (red_hold != this->led_numbers_.end()) {
+    red_hold->second->publish_state(
+        this->status_lights_.red_afterglow_ms() /
+        1000.0f);
+  }
+
   auto standby = this->led_numbers_.find(LEDSetting::STANDBY_TIMEOUT);
-  if (standby != this->led_numbers_.end()) standby->second->publish_state(this->led_standby_timeout_ms_ / 1000.0f);
+
+  if (standby != this->led_numbers_.end()) {
+    standby->second->publish_state(
+        this->status_lights_.standby_timeout_ms() /
+        1000.0f);
+  }
 
   if (this->operating_mode_select_ != nullptr) {
     this->operating_mode_select_->publish_state(
@@ -130,6 +148,42 @@ void LDL508PROComponent::loop() {
   }
 
   const uint32_t now = millis();
+
+  // Mehrzieltracks auch dann abschließen, wenn nach dem Fahrzeug
+  // kein neuer Radar-Batch mehr eintrifft.
+  if (this->operating_mode_ ==
+          RadarOperatingMode::HEX_MULTI_TARGET &&
+      this->runtime_config_state_ ==
+          RuntimeConfigState::IDLE_HEX) {
+
+    for (auto &track : this->multi_target_tracks_) {
+      if (!track.active)
+        continue;
+
+      const uint32_t age_ms =
+          static_cast<uint32_t>(now - track.last_seen_ms);
+
+      if (age_ms <= 3000)
+        continue;
+
+      this->publish_completed_track_(track, now);
+
+      ESP_LOGI(
+          TAG,
+          "TRACK-MGR expired track %u after %" PRIu32
+          " ms without requiring a new batch",
+          static_cast<unsigned>(track.id),
+          age_ms);
+
+      if (this->primary_vehicle_track_id_ == track.id) {
+        this->primary_vehicle_track_id_ = 0;
+      }
+
+      track.active = false;
+    }
+
+    this->update_driveway_traffic_state_(now);
+  }
 
   if (this->operating_mode_ ==
           RadarOperatingMode::HEX_MULTI_TARGET &&
@@ -289,9 +343,9 @@ void LDL508PROComponent::loop() {
     ESP_LOGI(TAG, "CONFIG: HEX mode 2 ready");
   }
 
-  // Phase 7.1 starts the selected diagnostic mode only after the normal ASCII
-  // configuration synchronization has completed. This leaves the stable boot
-  // path unchanged and makes "off" identical to stable 1.0.
+// Den konfigurierten Radar-Datenmodus erst starten, nachdem die initiale
+// ASCII-Konfigurationssynchronisation abgeschlossen ist. Dadurch bleiben
+// Konfigurationsverkehr und kontinuierlicher Messdatenstrom sauber getrennt.
   if (!this->multitarget_debug_started_ && this->boot_read_started_ &&
       this->config_manager_.is_synchronized() && !this->config_manager_.is_busy() &&
       this->multitarget_debug_mode_ != "off") {
@@ -308,7 +362,7 @@ void LDL508PROComponent::loop() {
       if (!payload.empty()) payload += " ";
       payload += part;
     }
-    ESP_LOGD(TAG, "RAW7.1-HEX: %s", payload.c_str());
+    ESP_LOGD(TAG, "MODE2 RAW HEX: %s", payload.c_str());
     this->publish_multitarget_raw_mqtt_(payload, true);
     this->multitarget_hex_mqtt_block_length_ = 0;
   }
@@ -405,7 +459,28 @@ void LDL508PROComponent::loop() {
   }
 
   // LED timers and fault blinking continue even when no new radar frame arrives.
-  this->update_status_outputs_();
+
+  // zwingend auf millis() da sonst afterglow nicht funktioniert
+  //this->status_lights_.loop(millis());
+
+  //this->carport_presence_.loop(millis());
+
+  const uint32_t peripheral_now = millis();
+
+  this->status_lights_.loop(
+      peripheral_now);
+
+  this->carport_presence_.loop(
+      peripheral_now);
+
+  this->update_carport_sensors_(
+      peripheral_now);
+
+  this->driveway_controller_.loop(
+      peripheral_now);
+
+  this->warning_light_.set_active(
+    this->driveway_controller_.active());
 
   // Some firmware revisions omit PointNum or the final HEADA summary. Close a
   // partially received snapshot after a short quiet period.
@@ -656,7 +731,7 @@ void LDL508PROComponent::process_byte_(uint8_t byte) {
         if (!payload.empty()) payload += " ";
         payload += part;
       }
-      ESP_LOGD(TAG, "RAW7.1-HEX: %s", payload.c_str());
+      ESP_LOGD(TAG, "MODE2 RAW HEX: %s", payload.c_str());
       this->publish_multitarget_raw_mqtt_(payload, true);
       this->multitarget_hex_mqtt_block_length_ = 0;
     }
@@ -791,7 +866,7 @@ void LDL508PROComponent::process_multi_target_byte_(uint8_t byte, uint32_t now_m
 void LDL508PROComponent::process_multi_target_frame_(const std::string &frame, uint32_t now_ms) {
   const std::string escaped_frame = escape_raw_bytes_(frame);
   if (this->multitarget_debug_mode_ == "ascii") {
-    ESP_LOGI(TAG, "RAW7.1.1-ASCII: %s", escaped_frame.c_str());
+    ESP_LOGI(TAG, "ASCII RAW FRAME: %s", escaped_frame.c_str());
     this->publish_multitarget_raw_mqtt_(frame, false);
   }
   if (frame.size() < 7 || frame.rfind("HEADA", 0) != 0) return;
@@ -980,7 +1055,7 @@ void LDL508PROComponent::process_line_(std::string line) {
   const std::string escaped_line = escape_raw_bytes_(line);
   if (this->debug_uart_) ESP_LOGD(TAG, "RX: %s", escaped_line.c_str());
   if (this->multitarget_debug_mode_ == "ascii" && this->multitarget_debug_started_) {
-    ESP_LOGI(TAG, "RAW7.1.1-ASCII-LINE: %s", escaped_line.c_str());
+    ESP_LOGI(TAG, "ASCII RAW LINE: %s", escaped_line.c_str());
     this->publish_multitarget_raw_mqtt_(line, false);
   }
   if (this->raw_capture_active_) {
@@ -1028,6 +1103,7 @@ void LDL508PROComponent::process_line_(std::string line) {
 
     this->last_target_ms_ = measurement.timestamp_ms;
     this->publish_detection_(true);
+    this->update_driveway_traffic_state_(now_ms);
     return;
   }
 
@@ -1172,6 +1248,52 @@ LDL508PROComponent::find_primary_multi_target_track_(
   return primary_track;
 }
 
+void LDL508PROComponent::update_driveway_traffic_state_(
+    uint32_t now_ms) {
+
+  bool approaching_traffic = false;
+
+  // ----------------------------------------------------------
+  // Mehrzielmodus:
+  // JEDER aktuell sichtbare Track wird betrachtet.
+  // Ein einziges annäherndes Fahrzeug reicht für Warnung.
+  // ----------------------------------------------------------
+  if (this->operating_mode_ ==
+      RadarOperatingMode::HEX_MULTI_TARGET) {
+
+    for (const auto &track :
+         this->multi_target_tracks_) {
+
+      if (!track.active) {
+        continue;
+      }
+
+      // Negative Geschwindigkeit = Annähernd.
+      if (track.speed_kmh < -0.5f) {
+        approaching_traffic = true;
+        break;
+      }
+    }
+
+  } else {
+
+    // --------------------------------------------------------
+    // Einzelzielmodus:
+    // Die aktuelle Richtung stammt aus dem VehicleTracker.
+    // --------------------------------------------------------
+    if (this->target_detected_) {
+
+      approaching_traffic =
+          this->vehicle_tracker_.current_direction() ==
+          VehicleDirection::APPROACHING;
+    }
+  }
+
+  this->driveway_controller_.set_traffic_warning(
+      approaching_traffic,
+      now_ms);
+}
+
 void LDL508PROComponent::publish_target_snapshot_(uint32_t now_ms) {
 
   for (uint8_t slot = 0; slot < this->target_points_.size(); slot++) {
@@ -1296,6 +1418,8 @@ void LDL508PROComponent::publish_target_snapshot_(uint32_t now_ms) {
   if (detected != this->target_detected_) {
       this->publish_detection_(detected);
   }
+
+  this->update_driveway_traffic_state_(now_ms);
 
   if (count > this->max_simultaneous_targets_) this->max_simultaneous_targets_ = count;
 
@@ -1431,8 +1555,44 @@ void LDL508PROComponent::publish_completed_track_(
           ? track.speed_sum_kmh / track.sample_count
           : 0.0f;
 
+  const uint32_t duration_ms =
+      static_cast<uint32_t>(
+          track.last_seen_ms - track.first_seen_ms);
+
   const float duration_s =
-      (track.last_seen_ms - track.first_seen_ms) / 1000.0f;
+      duration_ms / 1000.0f;
+
+  const float travel_distance_m =
+    std::fabs(
+        track.end_distance_m -
+        track.start_distance_m);
+
+  const float samples_per_second =
+      duration_s > 0.0f
+          ? static_cast<float>(track.sample_count) / duration_s
+          : static_cast<float>(track.sample_count);
+
+  const float meters_per_sample =
+      track.sample_count > 1
+          ? travel_distance_m /
+                static_cast<float>(track.sample_count - 1)
+          : 0.0f;   
+          
+  const char *confidence = "high";
+
+  if (track.sample_count <= 1) {
+    confidence = "low";
+
+  } else if (
+      track.sample_count <= 3 &&
+      travel_distance_m < 5.0f) {
+    confidence = "low";
+
+  } else if (
+      track.sample_count <= 5 ||
+      travel_distance_m < 10.0f) {
+    confidence = "medium";
+  }
 
   if (this->vehicle_start_distance_sensor_ != nullptr) {
     this->vehicle_start_distance_sensor_->publish_state(
@@ -1504,8 +1664,8 @@ void LDL508PROComponent::publish_completed_track_(
           : "ascii";
 
   //char json[512];
-
-  char json[640];
+  //char json[640];
+  char json[768];
 
   std::snprintf(
       json,
@@ -1521,7 +1681,15 @@ void LDL508PROComponent::publish_completed_track_(
       "\"max_speed_kmh\":%.1f,"
       "\"average_speed_kmh\":%.1f,"
       "\"duration_s\":%.1f,"
+      "\"duration_ms\":%" PRIu32 ","
+      "\"first_seen_ms\":%" PRIu32 ","
+      "\"last_seen_ms\":%" PRIu32 ","
+      "\"max_targets\":%u,"
       "\"samples\":%u,"
+      "\"travel_distance_m\":%.1f,"
+      "\"samples_per_second\":%.2f,"
+      "\"meters_per_sample\":%.2f,"
+      "\"confidence\":\"%s\","
       "\"ghosts_filtered\":%" PRIu32 ","
       "\"firmware\":\"%s\"}",
       static_cast<unsigned>(track.id),
@@ -1535,48 +1703,57 @@ void LDL508PROComponent::publish_completed_track_(
       track.maximum_speed_kmh,
       average_speed,
       duration_s,
+      duration_ms,
+      track.first_seen_ms,
+      track.last_seen_ms,
+      static_cast<unsigned>(track.max_targets_seen),
       static_cast<unsigned>(track.sample_count),
+      travel_distance_m,
+      samples_per_second,
+      meters_per_sample,
+      confidence,
       this->artifact_filtered_count_,
       FIRMWARE_VERSION);
 
-/* testweise off
   if (this->last_vehicle_event_sensor_ != nullptr) {
-    this->last_vehicle_event_sensor_->publish_state(json);
-  }
-*/
+    char summary[160];
 
-  if (this->last_vehicle_event_sensor_ != nullptr) {
+    std::snprintf(
+        summary,
+        sizeof(summary),
+        "#%u | %s | %s | Ø %.1f km/h | %.1f m | %s | max_targets=%u",
+        static_cast<unsigned>(track.id),
+        mode_label,
+        direction,
+        average_speed,
+        travel_distance_m,
+        confidence,
+        static_cast<unsigned>(track.max_targets_seen));
 
-      char short_json[160];
-
-      std::snprintf(
-          short_json,
-          sizeof(short_json),
-          "{\"id\":%u,\"mode\":\"%s\",\"protocol\":\"%s\"}",
-          static_cast<unsigned>(track.id),
-          mode,
-          protocol);
-
-      this->last_vehicle_event_sensor_->publish_state(short_json);
+    this->last_vehicle_event_sensor_->publish_state(summary);
   }
 
   this->publish_vehicle_event_mqtt_(json);
 
   ESP_LOGI(
       TAG,
-      "VEHICLE COMPLETE mode=%s protocol=%s id=%u samples=%u "
+      "VEHICLE COMPLETE confidence=%s mode=%s protocol=%s "
+      "id=%u samples=%u travel=%.1f m "
       "start=%.1f end=%.1f min=%.1f avg=%.1f max=%.1f "
-      "duration=%.1f",
+      "duration=%.1f samples_per_s=%.2f",
+      confidence,
       mode,
       protocol,
       static_cast<unsigned>(track.id),
       static_cast<unsigned>(track.sample_count),
+      travel_distance_m,
       track.start_distance_m,
       track.end_distance_m,
       track.minimum_distance_m,
       average_speed,
       track.maximum_speed_kmh,
-      duration_s);
+      duration_s,
+      samples_per_second);
 
     (void) now_ms;
 }
@@ -1603,8 +1780,17 @@ void LDL508PROComponent::publish_vehicle_tracker_event_(
       static_cast<float>(event.sample_count);
 
   // publish_completed_track_ berechnet die Dauer aus diesen Zeitstempeln.
-  track.first_seen_ms = 0;
-  track.last_seen_ms = event.duration_ms;
+  //track.first_seen_ms = 0;
+  //track.last_seen_ms = event.duration_ms;
+
+  const uint32_t completed_at_ms = millis();
+
+  track.last_seen_ms = completed_at_ms;
+  track.first_seen_ms =
+      static_cast<uint32_t>(
+          completed_at_ms - event.duration_ms);
+
+  track.max_targets_seen = 1;
 
   // Vorzeichen nur zur Richtungsbestimmung im gemeinsamen Publisher.
   track.speed_kmh = event.average_speed_kmh;
@@ -1629,7 +1815,88 @@ void LDL508PROComponent::publish_vehicle_tracker_event_(
     this->vehicle_id_sensor_->publish_state(event.id);
   }
 
-  this->publish_completed_track_(track, millis());
+  //this->publish_completed_track_(track, millis());
+
+  this->publish_completed_track_(
+    track,
+    completed_at_ms);
+}
+
+void LDL508PROComponent::update_carport_sensors_(
+    uint32_t now_ms) {
+
+  if (!this->carport_presence_.initialized()) {
+    return;
+  }
+
+  const bool beam_clear =
+      this->carport_presence_.beam_clear();
+
+  const bool occupied =
+      this->carport_presence_.occupied();
+
+  // ----------------------------------------------------------
+  // Aktueller Zustand der Lichtschranke
+  // ----------------------------------------------------------
+  if (this->carport_beam_clear_sensor_ != nullptr &&
+      (!this->carport_beam_clear_has_state_ ||
+       beam_clear != this->last_carport_beam_clear_)) {
+
+    this->carport_beam_clear_sensor_->publish_state(
+        beam_clear);
+
+    this->last_carport_beam_clear_ = beam_clear;
+    this->carport_beam_clear_has_state_ = true;
+  }
+
+  // ----------------------------------------------------------
+  // Belegungszustand des Carports
+  // ----------------------------------------------------------
+  if (this->carport_occupied_sensor_ != nullptr &&
+      (!this->carport_occupied_has_state_ ||
+       occupied != this->last_carport_occupied_)) {
+
+    this->carport_occupied_sensor_->publish_state(
+        occupied);
+
+    this->last_carport_occupied_ = occupied;
+    this->carport_occupied_has_state_ = true;
+  }
+
+  // ----------------------------------------------------------
+  // Bestätigte Ausfahrt als kurzer Ereignisimpuls
+  // ----------------------------------------------------------
+  if (this->carport_presence_.departure_confirmed()) {
+
+    this->carport_presence_.clear_departure_event();
+
+    this->driveway_controller_.trigger_departure(now_ms);
+
+    if (this->carport_departure_sensor_ != nullptr) {
+      this->carport_departure_sensor_->publish_state(true);
+    }
+
+    this->carport_departure_pulse_active_ = true;
+    this->carport_departure_pulse_started_ms_ = now_ms;
+
+    ESP_LOGI(
+        TAG,
+        "Carport departure event published");
+  }
+
+  // Ereignissensor nach 3 Sekunden wieder zurücksetzen.
+  if (this->carport_departure_pulse_active_ &&
+      static_cast<uint32_t>(
+          now_ms -
+          this->carport_departure_pulse_started_ms_) >=
+          CARPORT_DEPARTURE_PULSE_MS) {
+
+    this->carport_departure_pulse_active_ = false;
+
+    if (this->carport_departure_sensor_ != nullptr) {
+      this->carport_departure_sensor_->publish_state(false);
+    }
+  }
 }
 
 void LDL508PROComponent::begin_runtime_ascii_mode_() {
@@ -1746,8 +2013,6 @@ void LDL508PROComponent::queue_runtime_config_write_(
   this->config_error(
       "Konfigurationsänderung in ungültigem Betriebszustand");
 }
-// 1122
-
 
 void LDL508PROComponent::flush_multi_target_batch_(uint32_t now_ms) {
   this->pending_target_batch_active_ = false;
@@ -1827,6 +2092,27 @@ void LDL508PROComponent::flush_multi_target_batch_(uint32_t now_ms) {
             speed_difference_kmh);
       }
     }
+  }
+
+
+  // Anzahl eigenständiger Ziele in diesem Batch.
+  // Als Doppelreflexion erkannte Slots werden nicht zusätzlich gezählt.
+  uint8_t batch_target_count = 0;
+
+  for (uint8_t radar_slot = 0;
+      radar_slot < this->pending_target_slots_.size();
+      radar_slot++) {
+
+    if (!this->pending_target_slots_[radar_slot])
+      continue;
+
+    if (duplicate_of_slot[radar_slot] >= 0)
+      continue;
+
+    if (!this->target_points_[radar_slot].valid)
+      continue;
+
+    batch_target_count++;
   }
 
   // ------------------------------------------------------------
@@ -1982,15 +2268,13 @@ void LDL508PROComponent::flush_multi_target_batch_(uint32_t now_ms) {
       track.last_seen_ms = now_ms;
       track.last_radar_slot = radar_slot;
       track.sample_count = 0;
+      track.max_targets_seen = 1;
 
-      // 1103
       track.start_distance_m = point.distance_m;
       track.end_distance_m = point.distance_m;
       track.minimum_distance_m = point.distance_m;
-
       track.maximum_speed_kmh = 0.0f;
-      track.speed_sum_kmh = 0.0f;
-      // 1103
+      track.speed_sum_kmh = 0.0f;      
 
       assigned_track[radar_slot] =
           static_cast<int8_t>(track_index);
@@ -2052,6 +2336,10 @@ void LDL508PROComponent::flush_multi_target_batch_(uint32_t now_ms) {
     // Die Trackmessung selbst wird ausschließlich vom Hauptslot aktualisiert.
     if (duplicate_of_slot[radar_slot] >= 0)
       continue;
+
+    if (batch_target_count > track.max_targets_seen) {
+      track.max_targets_seen = batch_target_count;
+    }
 
     track.distance_m = point.distance_m;
     track.speed_kmh = point.speed_kmh;
@@ -2263,91 +2551,83 @@ void LDL508PROComponent::request_multi_target_snapshot() {
 }
 
 void LDL508PROComponent::publish_detection_(bool detected) {
-  const uint32_t now = millis();
-  const bool changed = this->target_detected_ != detected;
-  const bool sensor_needs_initial_state = this->detected_sensor_ != nullptr && !this->detected_sensor_->has_state();
 
-  if (this->detection_state_initialized_ && changed && !detected) {
-    this->led_afterglow_active_ = this->led_red_afterglow_ms_ > 0;
-    this->led_afterglow_started_ms_ = now;
-    if (!this->led_afterglow_active_) this->led_idle_started_ms_ = now;
-  } else if (detected) {
-    this->led_afterglow_active_ = false;
-    this->led_idle_started_ms_ = now;
-  }
+  const uint32_t now = millis();
+
+  const bool changed =
+      this->target_detected_ != detected;
+
+  const bool sensor_needs_initial_state =
+      this->detected_sensor_ != nullptr &&
+      !this->detected_sensor_->has_state();
 
   this->target_detected_ = detected;
-  this->detection_state_initialized_ = true;
-  if (this->detected_sensor_ != nullptr && (changed || sensor_needs_initial_state)) {
+
+  if (this->detected_sensor_ != nullptr &&
+      (changed || sensor_needs_initial_state)) {
     this->detected_sensor_->publish_state(detected);
   }
-  this->update_status_outputs_();
+
+  this->status_lights_.set_detected(
+      detected,
+      now);
 }
 
-void LDL508PROComponent::set_led_setting(LEDSetting setting, float seconds) {
-  if (!std::isfinite(seconds)) return;
-  const uint32_t milliseconds = static_cast<uint32_t>(std::max(0.0f, seconds) * 1000.0f);
-  if (setting == LEDSetting::RED_AFTERGLOW) {
-    this->led_red_afterglow_ms_ = milliseconds;
-    if (milliseconds == 0 && this->led_afterglow_active_) {
-      this->led_afterglow_active_ = false;
-      this->led_idle_started_ms_ = millis();
-    }
-  } else {
-    this->led_standby_timeout_ms_ = milliseconds;
+void LDL508PROComponent::set_led_setting(
+    LEDSetting setting,
+    float seconds) {
+
+  if (!std::isfinite(seconds)) {
+    return;
   }
+
+  const uint32_t milliseconds =
+      static_cast<uint32_t>(
+          std::max(0.0f, seconds) * 1000.0f);
+
+  float published_seconds = 0.0f;
+
+  if (setting == LEDSetting::RED_AFTERGLOW) {
+
+    this->status_lights_.set_red_afterglow_ms(
+        milliseconds,
+        millis());
+
+    published_seconds =
+        this->status_lights_.red_afterglow_ms() /
+        1000.0f;
+
+  } else if (setting == LEDSetting::STANDBY_TIMEOUT) {
+
+    this->status_lights_.set_standby_timeout_ms(
+        milliseconds);
+
+    published_seconds =
+        this->status_lights_.standby_timeout_ms() /
+        1000.0f;
+
+  } else {
+
+    return;
+  }
+
   auto it = this->led_numbers_.find(setting);
-  if (it != this->led_numbers_.end()) it->second->publish_state(milliseconds / 1000.0f);
-  this->update_status_outputs_();
+
+  if (it != this->led_numbers_.end()) {
+    it->second->publish_state(published_seconds);
+  }
 }
 
 void LDL508PROComponent::set_led_fault_(bool active) {
-  if (this->led_fault_active_ == active) return;
-  this->led_fault_active_ = active;
-  this->led_fault_blink_state_ = false;
-  this->led_fault_blink_ms_ = millis();
-  ESP_LOGW(TAG, "LED fault indication: %s", active ? "ACTIVE (red blinking)" : "cleared");
-  this->update_status_outputs_();
-}
-
-void LDL508PROComponent::update_status_outputs_() {
-  const uint32_t now = millis();
-  bool red = false;
-  bool green = false;
-
-  // A configuration fault has highest priority: red blinks at 1 Hz, green is off.
-  if (this->led_fault_active_) {
-    if (static_cast<uint32_t>(now - this->led_fault_blink_ms_) >= 500) {
-      this->led_fault_blink_ms_ = now;
-      this->led_fault_blink_state_ = !this->led_fault_blink_state_;
-    }
-    red = this->led_fault_blink_state_;
-  } else if (this->target_detected_) {
-    red = true;
-  } else {
-    if (this->led_afterglow_active_ &&
-        static_cast<uint32_t>(now - this->led_afterglow_started_ms_) >= this->led_red_afterglow_ms_) {
-      this->led_afterglow_active_ = false;
-      this->led_idle_started_ms_ = now;
-    }
-    if (this->led_afterglow_active_) {
-      red = true;
-    } else {
-      // A standby value of 0 disables standby and keeps green on continuously.
-      green = this->led_standby_timeout_ms_ == 0 ||
-              static_cast<uint32_t>(now - this->led_idle_started_ms_) < this->led_standby_timeout_ms_;
-    }
-  }
-
-  // The external LED driver is active HIGH and switches the channel's GND.
-  if (this->red_output_pin_ != nullptr) this->red_output_pin_->digital_write(red);
-  if (this->green_output_pin_ != nullptr) this->green_output_pin_->digital_write(green);
+  this->status_lights_.set_fault(
+      active,
+      millis());
 }
 
 void LDL508PROComponent::finish_vehicle_event_(uint32_t now_ms) {
   VehicleEvent event{};
   if (!this->vehicle_tracker_.finish(now_ms, event)) return;
-  //this->completed_vehicle_count_++;
+ 
   ESP_LOGI(TAG, "Vehicle #%" PRIu32 " completed: %s, %.1f km/h max, %.1f km/h average, %" PRIu32 " samples",
            event.id, vehicle_direction_to_string(event.direction), event.max_speed_kmh, event.average_speed_kmh,
            event.sample_count);
@@ -2419,7 +2699,7 @@ void LDL508PROComponent::publish_multitarget_parsed_mqtt_(const std::string &pay
 
 void LDL508PROComponent::send_hex_target_mode_command_(uint8_t mode) {
   const uint8_t command[] = {0xAA, 0xAA, 0x00, 0x48, mode, 0x55, 0x55};
-  ESP_LOGW(TAG, "PHASE7.1 HEX TX: AA AA 00 48 %02X 55 55", mode);
+  ESP_LOGW(TAG, "MODE2 HEX TX: AA AA 00 48 %02X 55 55", mode);
   this->write_array(command, sizeof(command));
 }
 
@@ -2429,10 +2709,10 @@ void LDL508PROComponent::start_multitarget_debug_() {
   this->multi_target_stream_buffer_.clear();
   this->discard_until_newline_ = false;
   if (this->multitarget_debug_mode_ == "ascii") {
-    ESP_LOGW(TAG, "Phase 7.1.1 ASCII multi-target logger starting (MQTT-only escaped raw stream)");
+    ESP_LOGW(TAG, "ASCII multi-target logger starting (MQTT-only escaped raw stream)");
     this->request_target_mode(0);
     this->set_timeout("phase71_headw", 300, [this]() {
-      ESP_LOGW(TAG, "PHASE7.1 TX: HEADW4k");
+      ESP_LOGW(TAG, "MODE2 HEX TX: HEADW4k");
       this->write_str("HEADW4k\r\n");
     });
   } else if (this->multitarget_debug_mode_ == "hex") {
@@ -2535,7 +2815,6 @@ void LDL508PROComponent::set_numeric_parameter(RadarParameter parameter, float v
     this->config_error(error);
     return;
   }
-  //this->config_manager_.queue_write(parameter, value);
 
   this->queue_runtime_config_write_(parameter, value);
 }
@@ -2563,8 +2842,6 @@ void LDL508PROComponent::set_select_parameter(RadarParameter parameter, const st
     this->config_error("Unbekannte Select-Auswahl: " + value);
     return;
   }
-
-  //this->config_manager_.queue_write(parameter, static_cast<float>(raw));
 
   this->queue_runtime_config_write_(
     parameter,

@@ -25,6 +25,10 @@
 #include "vehicle_tracker.h"
 #include "ghost_filter.h"
 #include "mode2_hex_parser.h"
+#include "status_light_controller.h"
+#include "carport_presence_controller.h"
+#include "driveway_controller.h"
+#include "warning_light_controller.h"
 
 namespace esphome {
 namespace ldl508pro {
@@ -140,8 +144,13 @@ class LDL508PROComponent : public Component,
   void set_auto_enable_multi_target_after_sync(bool value) { this->auto_enable_multi_target_after_sync_ = value; }
   void set_raw_capture_duration(uint32_t value) { this->raw_capture_duration_ms_ = value; }
   void set_raw_capture_max_bytes(uint32_t value) { this->raw_capture_max_bytes_ = value; }
-  void set_red_output_pin(GPIOPin *pin) { this->red_output_pin_ = pin; }
-  void set_green_output_pin(GPIOPin *pin) { this->green_output_pin_ = pin; }
+  //void set_red_output_pin(GPIOPin *pin) { this->red_output_pin_ = pin; }
+  //void set_green_output_pin(GPIOPin *pin) { this->green_output_pin_ = pin; }
+  void set_red_output_pin(GPIOPin *pin) { this->status_lights_.set_red_output_pin(pin); }
+  void set_green_output_pin(GPIOPin *pin) { this->status_lights_.set_green_output_pin(pin); }
+  void set_carport_barrier_pin(GPIOPin *pin) { this->carport_presence_.set_input_pin(pin); }
+  void set_warning_output_pin(GPIOPin *pin) { this->warning_light_.set_output_pin(pin); }
+  void set_carport_clear_confirm_ms(uint32_t value) { this->carport_presence_.set_clear_confirm_ms(value); }
   void set_artifact_filter(bool value) { this->artifact_filter_enabled_ = value; }
   void set_artifact_distance(float value) { this->artifact_distance_m_ = value; }
   void set_artifact_distance_tolerance(float value) { this->artifact_distance_tolerance_m_ = value; }
@@ -162,6 +171,11 @@ class LDL508PROComponent : public Component,
   void set_distance_sensor(sensor::Sensor *value) { this->distance_sensor_ = value; }
   void set_speed_sensor(sensor::Sensor *value) { this->speed_sensor_ = value; }
   void set_detected_sensor(binary_sensor::BinarySensor *value) { this->detected_sensor_ = value; }
+  void set_carport_beam_clear_sensor(binary_sensor::BinarySensor *sensor) { this->carport_beam_clear_sensor_ = sensor; }
+  void set_carport_occupied_sensor(binary_sensor::BinarySensor *sensor) { this->carport_occupied_sensor_ = sensor; }
+  void set_carport_departure_sensor(binary_sensor::BinarySensor *sensor) { this->carport_departure_sensor_ = sensor; }
+  void set_driveway_active_timeout_ms(uint32_t value) { this->driveway_controller_.set_active_timeout_ms(value); }
+  
   void set_config_synchronized_sensor(binary_sensor::BinarySensor *value) { this->config_synchronized_sensor_ = value; }
   void set_configuration_sensor(text_sensor::TextSensor *value) { this->configuration_sensor_ = value; }
   void set_last_config_error_sensor(text_sensor::TextSensor *value) { this->last_config_error_sensor_ = value; }
@@ -208,7 +222,7 @@ class LDL508PROComponent : public Component,
   void config_value_received(RadarParameter parameter, float value) override;
   void config_sync_changed(bool synchronized) override;
   void config_error(const std::string &message) override;
-
+  
  protected:
   struct MultiTargetTrack;
 
@@ -264,6 +278,10 @@ class LDL508PROComponent : public Component,
 
   void apply_hex_multi_target_mode_();
 
+  void update_carport_sensors_(uint32_t now_ms);
+
+  void update_driveway_traffic_state_(uint32_t now_ms);
+
   void reset_tracking_state_for_mode_change_();
   uint8_t count_visible_multi_target_tracks_(uint32_t now_ms) const;
   static bool parse_target_row_(const std::string &line, uint8_t &id, float &distance_m, float &speed_kmh, float &snr);
@@ -282,16 +300,22 @@ class LDL508PROComponent : public Component,
   static constexpr size_t MAX_LINE_LENGTH = 512;
   static constexpr size_t MAX_INGRESS_LENGTH = 2048;
 
+  // controller objekte
   UARTParser uart_parser_{};
   ConfigManager config_manager_;
   VehicleTracker vehicle_tracker_{};
   Mode2HexParser mode2_hex_parser_;
+  StatusLightController status_lights_{};
+  CarportPresenceController carport_presence_{};
+  DrivewayController driveway_controller_{};
+  WarningLightController warning_light_{};
 
   std::string rx_buffer_{};
   std::string ingress_buffer_{};
   bool discard_until_newline_{false};
   bool debug_uart_{false};
   bool target_detected_{false};
+
   GPIOPin *red_output_pin_{nullptr};
   GPIOPin *green_output_pin_{nullptr};
   uint32_t led_red_afterglow_ms_{5000};
@@ -302,6 +326,18 @@ class LDL508PROComponent : public Component,
   bool led_afterglow_active_{false};
   bool led_fault_active_{false};
   bool led_fault_blink_state_{false};
+
+  binary_sensor::BinarySensor *carport_beam_clear_sensor_{nullptr};
+  binary_sensor::BinarySensor *carport_occupied_sensor_{nullptr};
+  binary_sensor::BinarySensor *carport_departure_sensor_{nullptr};
+  bool carport_beam_clear_has_state_{false};
+  bool carport_occupied_has_state_{false};
+  bool last_carport_beam_clear_{false};
+  bool last_carport_occupied_{false};
+  bool carport_departure_pulse_active_{false};
+  uint32_t carport_departure_pulse_started_ms_{0};
+  static constexpr uint32_t CARPORT_DEPARTURE_PULSE_MS = 3000;
+
   bool detection_state_initialized_{false};
   bool boot_read_started_{false};
   bool boot_mode_normalized_{false};
@@ -397,6 +433,8 @@ class LDL508PROComponent : public Component,
 
     uint8_t last_radar_slot{255};
     uint16_t sample_count{0};
+
+    uint8_t max_targets_seen{1};
 
     // Fahrzeugstatistik
     float start_distance_m{0.0f};
